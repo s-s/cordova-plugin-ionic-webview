@@ -26,9 +26,6 @@
 #import "CDVWKWebViewEngine.h"
 #import "CDVWKWebViewUIDelegate.h"
 #import "CDVWKProcessPoolFactory.h"
-#import "GCDWebServer.h"
-#import "GCDWebServerPrivate.h"
-#import "IONAssetHandler.h"
 
 #define CDV_BRIDGE_NAME @"cordova"
 #define CDV_IONIC_STOP_SCROLL @"stopScroll"
@@ -104,12 +101,10 @@
 @property (nonatomic, strong, readwrite) UIView* engineWebView;
 @property (nonatomic, strong, readwrite) id <WKUIDelegate> uiDelegate;
 @property (nonatomic, weak) id <WKScriptMessageHandler> weakScriptMessageHandler;
-@property (nonatomic, strong) GCDWebServer *webServer;
 @property (nonatomic, readwrite) CGRect frame;
 @property (nonatomic, strong) NSString *userAgentCreds;
 @property (nonatomic, assign) BOOL internalConnectionsOnly;
 @property (nonatomic, assign) BOOL useScheme;
-@property (nonatomic, strong) IONAssetHandler * handler;
 
 @property (nonatomic, readwrite) NSString *CDV_LOCAL_SERVER;
 @end
@@ -152,13 +147,6 @@ NSTimer *timer;
 
 - (void)initWebServer
 {
-    [GCDWebServer setLogLevel: kGCDWebServerLoggingLevel_Warning];
-    self.webServer = [[GCDWebServer alloc] init];
-
-    [self updateBindPath];
-    [self setServerPath:[self getStartPath]];
-
-    [self startServer];
 }
 
 -(NSString *) getStartPath {
@@ -199,46 +187,10 @@ NSTimer *timer;
 
 -(void)updateBindPath
 {
-    NSDictionary * settings = self.commandDelegate.settings;
-    //bind to designated hostname or default to localhost
-    NSString *bind = [settings cordovaSettingForKey:@"WKBind"];
-    if(bind == nil){
-        bind = @"localhost";
-    }
-
-    //bind to designated port or default to 8080
-    int portNumber = [settings cordovaFloatSettingForKey:@"WKPort" defaultValue:8080];
-
-    //set the local server name
-    self.CDV_LOCAL_SERVER = [NSString stringWithFormat:@"http://%@:%d", bind, portNumber];
 }
 
 -(void)startServer
 {
-    NSDictionary * settings = self.commandDelegate.settings;
-
-    //bind to designated port or default to 8080
-    int portNumber = [settings cordovaFloatSettingForKey:@"WKPort" defaultValue:8080];
-
-    //enable suspend in background if set in config
-    BOOL suspendInBackground = [settings cordovaBoolSettingForKey:@"WKSuspendInBackground" defaultValue:YES];
-    int waitTime = 10;
-
-    //extend default connection coalescing time when background enabled
-    if(!suspendInBackground){
-        NSLog(@"CDVWKWebViewEngine: Suspend in background disabled");
-        waitTime = 60;
-    }
-
-    NSDictionary *options = @{
-                              GCDWebServerOption_AutomaticallySuspendInBackground: @(suspendInBackground),
-                              GCDWebServerOption_ConnectedStateCoalescingInterval: @(waitTime),
-                              GCDWebServerOption_Port: @(portNumber),
-                              GCDWebServerOption_BindToLocalhost: @(YES),
-                              GCDWebServerOption_ServerName: @"Ionic"
-                              };
-
-    [self.webServer startWithOptions:options error:nil];
 }
 
 - (WKWebViewConfiguration*) createConfigurationFromSettings:(NSDictionary*)settings
@@ -278,15 +230,6 @@ NSTimer *timer;
     }
 
     self.internalConnectionsOnly = [settings cordovaBoolSettingForKey:@"WKInternalConnectionsOnly" defaultValue:YES];
-    if (self.useScheme) {
-        NSString *bind = [settings cordovaSettingForKey:@"HostName"];
-        if(bind == nil){
-            bind = @"app";
-        }
-        self.CDV_LOCAL_SERVER = [NSString stringWithFormat:@"ionic://%@", bind];
-    } else {
-        [self initWebServer];
-    }
 
     self.uiDelegate = [[CDVWKWebViewUIDelegate alloc] initWithTitle:[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"]];
 
@@ -326,14 +269,6 @@ NSTimer *timer;
 
     WKWebViewConfiguration* configuration = [self createConfigurationFromSettings:settings];
     configuration.userContentController = userContentController;
-
-    if (@available(iOS 11.0, *)) {
-        if (self.useScheme) {
-            self.handler = [[IONAssetHandler alloc] init];
-            [self.handler setAssetPath:[self getStartPath]];
-            [configuration setURLSchemeHandler:self.handler forURLScheme:@"ionic"];
-        }
-    }
 
     // re-create WKWebView, since we need to update configuration
     // remove from keyWindow before recreating
@@ -546,7 +481,7 @@ static void * KVOContext = &KVOContext;
 
 - (BOOL)isSafeToReload
 {
-    return [self.webServer isRunning] || self.useScheme;
+    return YES;
 }
 
 - (BOOL)shouldReloadWebView:(NSURL *)location title:(NSString*)title
@@ -569,21 +504,6 @@ static void * KVOContext = &KVOContext;
 
 - (id)loadRequest:(NSURLRequest *)request
 {
-    if (request.URL.fileURL) {
-        NSURL* startURL = [NSURL URLWithString:((CDVViewController *)self.viewController).startPage];
-        NSString* startFilePath = [self.commandDelegate pathForResource:[startURL path]];
-        NSURL *url = [[NSURL URLWithString:self.CDV_LOCAL_SERVER] URLByAppendingPathComponent:request.URL.path];
-        if ([request.URL.path isEqualToString:startFilePath]) {
-            url = [NSURL URLWithString:self.CDV_LOCAL_SERVER];
-        }
-        if(request.URL.query) {
-            url = [NSURL URLWithString:[@"?" stringByAppendingString:request.URL.query] relativeToURL:url];
-        }
-        if(request.URL.fragment) {
-            url = [NSURL URLWithString:[@"#" stringByAppendingString:request.URL.fragment] relativeToURL:url];
-        }
-        request = [NSURLRequest requestWithURL:url];
-    }
     if ([self isSafeToReload]) {
         return [(WKWebView*)_engineWebView loadRequest:request];
     } else {
@@ -945,12 +865,6 @@ static void * KVOContext = &KVOContext;
 -(void)setServerBasePath:(CDVInvokedUrlCommand*)command
 {
     NSString * path = [command argumentAtIndex:0];
-    if (self.useScheme) {
-        self.basePath = path;
-        [self.handler setAssetPath:path];
-    } else {
-        [self setServerPath:path];
-    }
 
     NSURLRequest * request = [NSURLRequest requestWithURL:[NSURL URLWithString:self.CDV_LOCAL_SERVER]];
     if ([self isSafeToReload]) {
@@ -962,78 +876,9 @@ static void * KVOContext = &KVOContext;
 
 -(void)setServerPath:(NSString *) path
 {
-    self.basePath = path;
-    BOOL restart = [self.webServer isRunning];
-    if (restart) {
-        [self.webServer stop];
-    }
-
-    __block NSString* serverUrl = self.CDV_LOCAL_SERVER;
-    if (self.internalConnectionsOnly) {
-        [self internalConnectionsGetHandlerForPath:path];
-    } else {
-        [self.webServer addGETHandlerForBasePath:@"/" directoryPath:path indexFilename:((CDVViewController *)self.viewController).startPage cacheAge:0 allowRangeRequests:YES];
-    }
-    [self.webServer addHandlerForMethod:@"GET" pathRegex:@"_app_file_/" requestClass:GCDWebServerFileRequest.class asyncProcessBlock:^(__kindof GCDWebServerRequest * _Nonnull request, GCDWebServerCompletionBlock  _Nonnull completionBlock) {
-        NSString *urlToRemove = [serverUrl stringByAppendingString:@"/_app_file_"];
-        NSString *absUrl = [[[request URL] absoluteString] stringByReplacingOccurrencesOfString:urlToRemove withString:@""];
-
-        NSRange range = [absUrl rangeOfString:@"?"];
-        if (range.location != NSNotFound) {
-            absUrl = [absUrl substringToIndex:range.location];
-        }
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        if (![fileManager fileExistsAtPath:absUrl]) {
-            GCDWebServerResponse* response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_NotFound];
-            completionBlock(response);
-        } else {
-            GCDWebServerFileResponse *response = [GCDWebServerFileResponse responseWithFile:absUrl byteRange:request.byteRange];
-            [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
-            completionBlock(response);
-        }
-    }];
-    if (restart) {
-        [self startServer];
-    }
 }
 
 -(void) internalConnectionsGetHandlerForPath:(NSString*)directoryPath {
-    __weak CDVWKWebViewEngine * weakSelf = self;
-    [self.webServer addHandlerWithMatchBlock:^GCDWebServerRequest*(NSString* requestMethod, NSURL* requestURL, NSDictionary* requestHeaders, NSString* urlPath, NSDictionary* urlQuery) {
-        if (![requestMethod isEqualToString:@"GET"]) {
-            return nil;
-        }
-        return [[GCDWebServerRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
-    }
-    processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-        GCDWebServerResponse* response = nil;
-        NSString* userAgent = [request.headers objectForKey:@"User-Agent"];
-        if ([userAgent containsString:[weakSelf getUserAgentCredentials]]) {
-            NSString* filePath = [directoryPath stringByAppendingPathComponent:[request.path substringFromIndex:1]];
-            NSString* fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
-            if (fileType) {
-                if ([fileType isEqualToString:NSFileTypeDirectory]) {
-                    NSString* indexPath = [filePath stringByAppendingPathComponent:((CDVViewController *)weakSelf.viewController).startPage];
-                    NSString* indexType = [[[NSFileManager defaultManager] attributesOfItemAtPath:indexPath error:NULL] fileType];
-                    if ([indexType isEqualToString:NSFileTypeRegular]) {
-                        response = [GCDWebServerFileResponse responseWithFile:indexPath];
-                    }
-                } else if ([fileType isEqualToString:NSFileTypeRegular]) {
-                    response = [GCDWebServerFileResponse responseWithFile:filePath byteRange:request.byteRange];
-                    [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
-                }
-            }
-            if (response) {
-                response.cacheControlMaxAge = 0;
-            } else {
-                response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_NotFound];
-            }
-            [response setValue:@"*" forAdditionalHeader:@"Access-Control-Allow-Origin"];
-        } else {
-            response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_Unauthorized];
-        }
-        return response;
-    }];
 }
 
 -(void)persistServerBasePath:(CDVInvokedUrlCommand*)command
