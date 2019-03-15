@@ -78,14 +78,6 @@ If `UseScheme` is set to yes, it will use the `HostName` value as the host of th
 
 Example `ionic://app`
 
-#### WKSuspendInBackground
-
-```xml
-<preference name="WKSuspendInBackground" value="false" />
-```
-
-Whether to try to keep the server running when the app is backgrounded. Note: the server will likely be suspended by the OS after a few minutes. In particular, long-lived background tasks are not allowed on iOS outside of select audio and geolocation tasks.
-
 #### WKBind
 
 ```xml
